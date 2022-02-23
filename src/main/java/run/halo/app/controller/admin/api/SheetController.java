@@ -2,7 +2,6 @@ package run.halo.app.controller.admin.api;
 
 import static org.springframework.data.domain.Sort.Direction.DESC;
 
-import cn.hutool.core.util.IdUtil;
 import io.swagger.annotations.ApiOperation;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
@@ -34,6 +33,7 @@ import run.halo.app.model.vo.SheetDetailVO;
 import run.halo.app.model.vo.SheetListVO;
 import run.halo.app.service.OptionService;
 import run.halo.app.service.SheetService;
+import run.halo.app.utils.HaloUtils;
 
 /**
  * Sheet controller.
@@ -63,7 +63,7 @@ public class SheetController {
     @GetMapping("{sheetId:\\d+}")
     @ApiOperation("Gets a sheet")
     public SheetDetailVO getBy(@PathVariable("sheetId") Integer sheetId) {
-        Sheet sheet = sheetService.getById(sheetId);
+        Sheet sheet = sheetService.getWithLatestContentById(sheetId);
         return sheetService.convertToDetailVo(sheet);
     }
 
@@ -98,7 +98,7 @@ public class SheetController {
         @RequestBody @Valid SheetParam sheetParam,
         @RequestParam(value = "autoSave", required = false, defaultValue = "false")
             Boolean autoSave) {
-        Sheet sheetToUpdate = sheetService.getById(sheetId);
+        Sheet sheetToUpdate = sheetService.getWithLatestContentById(sheetId);
 
         sheetParam.update(sheetToUpdate);
 
@@ -126,10 +126,13 @@ public class SheetController {
     public BasePostDetailDTO updateDraftBy(
         @PathVariable("sheetId") Integer sheetId,
         @RequestBody PostContentParam contentParam) {
-        // Update draft content
-        Sheet sheet = sheetService.updateDraftContent(contentParam.getContent(), sheetId);
+        Sheet sheetToUse = sheetService.getById(sheetId);
+        String formattedContent = contentParam.decideContentBy(sheetToUse.getEditorType());
 
-        return new BasePostDetailDTO().convertFrom(sheet);
+        // Update draft content
+        Sheet sheet = sheetService.updateDraftContent(formattedContent,
+            contentParam.getOriginalContent(), sheetId);
+        return sheetService.convertToDetail(sheet);
     }
 
     @DeleteMapping("{sheetId:\\d+}")
@@ -149,7 +152,7 @@ public class SheetController {
 
         BasePostMinimalDTO sheetMinimalDTO = sheetService.convertToMinimal(sheet);
 
-        String token = IdUtil.simpleUUID();
+        String token = HaloUtils.simpleUUID();
 
         // cache preview token
         cacheStore.putAny(token, token, 10, TimeUnit.MINUTES);

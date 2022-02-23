@@ -6,16 +6,10 @@ import static run.halo.app.model.support.HaloConst.HALO_DATA_EXPORT_PREFIX;
 import static run.halo.app.utils.DateTimeUtils.HORIZONTAL_LINE_DATETIME_FORMATTER;
 import static run.halo.app.utils.FileUtils.checkDirectoryTraversal;
 
-import cn.hutool.core.date.DateUtil;
-import cn.hutool.core.io.IoUtil;
-import cn.hutool.core.io.file.FileWriter;
-import cn.hutool.core.util.CharsetUtil;
-import cn.hutool.core.util.IdUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.MalformedURLException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -39,10 +33,12 @@ import org.springframework.core.io.UrlResource;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.multipart.MultipartFile;
 import run.halo.app.config.properties.HaloProperties;
 import run.halo.app.event.options.OptionUpdatedEvent;
 import run.halo.app.event.theme.ThemeUpdatedEvent;
+import run.halo.app.exception.BadRequestException;
 import run.halo.app.exception.NotFoundException;
 import run.halo.app.exception.ServiceException;
 import run.halo.app.handler.file.FileHandler;
@@ -96,6 +92,8 @@ import run.halo.app.service.TagService;
 import run.halo.app.service.ThemeSettingService;
 import run.halo.app.service.UserService;
 import run.halo.app.utils.DateTimeUtils;
+import run.halo.app.utils.DateUtils;
+import run.halo.app.utils.FileUtils;
 import run.halo.app.utils.HaloUtils;
 import run.halo.app.utils.JsonUtils;
 
@@ -105,7 +103,8 @@ import run.halo.app.utils.JsonUtils;
  * @author johnniang
  * @author ryanwang
  * @author Raremaa
- * @date 2019-04-26
+ * @author guqing
+ * @date  2019-04-26
  */
 @Service
 @Slf4j
@@ -209,20 +208,23 @@ public class BackupServiceImpl implements BackupService {
     public BasePostDetailDTO importMarkdown(MultipartFile file) throws IOException {
 
         // Read markdown content.
-        String markdown = IoUtil.read(file.getInputStream(), StandardCharsets.UTF_8);
+        String markdown = FileUtils.readString(file.getInputStream());
 
         // TODO sheet import
         return postService.importMarkdown(markdown, file.getOriginalFilename());
     }
 
     @Override
-    public BackupDTO backupWorkDirectory() {
+    public BackupDTO backupWorkDirectory(List<String> options) {
+        if (CollectionUtils.isEmpty(options)) {
+            throw new BadRequestException("The options parameter is missing, at least one.");
+        }
         // Zip work directory to temporary file
         try {
             // Create zip path for halo zip
             String haloZipFileName = HALO_BACKUP_PREFIX
                 + DateTimeUtils.format(LocalDateTime.now(), HORIZONTAL_LINE_DATETIME_FORMATTER)
-                + IdUtil.simpleUUID().hashCode() + ".zip";
+                + HaloUtils.simpleUUID().hashCode() + ".zip";
             // Create halo zip file
             Path haloZipFilePath = Paths.get(haloProperties.getBackupDir(), haloZipFileName);
             if (!Files.exists(haloZipFilePath.getParent())) {
@@ -232,7 +234,17 @@ public class BackupServiceImpl implements BackupService {
 
             // Zip halo
             run.halo.app.utils.FileUtils
-                .zip(Paths.get(this.haloProperties.getWorkDir()), haloZipPath);
+                .zip(Paths.get(this.haloProperties.getWorkDir()), haloZipPath,
+                    path -> {
+                        for (String itemToBackup : options) {
+                            Path backupItemPath =
+                                Paths.get(this.haloProperties.getWorkDir()).resolve(itemToBackup);
+                            if (path.startsWith(backupItemPath)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
 
             // Build backup dto
             return buildBackupDto(BACKUP_RESOURCE_BASE_URI, haloZipPath);
@@ -334,7 +346,7 @@ public class BackupServiceImpl implements BackupService {
     public BackupDTO exportData() {
         Map<String, Object> data = new HashMap<>();
         data.put("version", HaloConst.HALO_VERSION);
-        data.put("export_date", DateUtil.now());
+        data.put("export_date", DateUtils.now());
         data.put("attachments", attachmentService.listAll());
         data.put("categories", categoryService.listAll(true));
         data.put("comment_black_list", commentBlackListService.listAll());
@@ -360,7 +372,7 @@ public class BackupServiceImpl implements BackupService {
         try {
             String haloDataFileName = HALO_DATA_EXPORT_PREFIX
                 + DateTimeUtils.format(LocalDateTime.now(), HORIZONTAL_LINE_DATETIME_FORMATTER)
-                + IdUtil.simpleUUID().hashCode() + ".json";
+                + HaloUtils.simpleUUID().hashCode() + ".json";
 
             Path haloDataFilePath = Paths.get(haloProperties.getDataExportDir(), haloDataFileName);
             if (!Files.exists(haloDataFilePath.getParent())) {
@@ -368,9 +380,7 @@ public class BackupServiceImpl implements BackupService {
             }
             Path haloDataPath = Files.createFile(haloDataFilePath);
 
-            FileWriter fileWriter = new FileWriter(haloDataPath.toFile(), CharsetUtil.UTF_8);
-            fileWriter.write(JsonUtils.objectToJson(data));
-
+            FileUtils.writeStringToFile(haloDataPath.toFile(), JsonUtils.objectToJson(data));
             return buildBackupDto(DATA_EXPORT_BASE_URI, haloDataPath);
         } catch (IOException e) {
             throw new ServiceException("导出数据失败", e);
@@ -420,7 +430,7 @@ public class BackupServiceImpl implements BackupService {
 
     @Override
     public void importData(MultipartFile file) throws IOException {
-        String jsonContent = IoUtil.read(file.getInputStream(), StandardCharsets.UTF_8);
+        String jsonContent = FileUtils.readString(file.getInputStream());
 
         ObjectMapper mapper = JsonUtils.createDefaultJsonMapper();
         TypeReference<HashMap<String, Object>> typeRef =
@@ -534,7 +544,7 @@ public class BackupServiceImpl implements BackupService {
 
         // Write files to the temporary directory
         String markdownFileTempPathName =
-            haloProperties.getBackupMarkdownDir() + IdUtil.simpleUUID().hashCode();
+            haloProperties.getBackupMarkdownDir() + HaloUtils.simpleUUID().hashCode();
         for (PostMarkdownVO postMarkdownVo : postMarkdownList) {
             StringBuilder content = new StringBuilder();
             Boolean needFrontMatter =
@@ -552,9 +562,7 @@ public class BackupServiceImpl implements BackupService {
                     Files.createDirectories(markdownFilePath.getParent());
                 }
                 Path markdownDataPath = Files.createFile(markdownFilePath);
-                FileWriter fileWriter =
-                    new FileWriter(markdownDataPath.toFile(), CharsetUtil.UTF_8);
-                fileWriter.write(content.toString());
+                FileUtils.writeStringToFile(markdownDataPath.toFile(), content.toString());
             } catch (IOException e) {
                 throw new ServiceException("导出数据失败", e);
             }
@@ -563,7 +571,7 @@ public class BackupServiceImpl implements BackupService {
         // Create zip path
         String markdownZipFileName = HALO_BACKUP_MARKDOWN_PREFIX
             + DateTimeUtils.format(LocalDateTime.now(), HORIZONTAL_LINE_DATETIME_FORMATTER)
-            + IdUtil.simpleUUID().hashCode() + ".zip";
+            + HaloUtils.simpleUUID().hashCode() + ".zip";
 
         // Create zip file
         Path markdownZipFilePath =

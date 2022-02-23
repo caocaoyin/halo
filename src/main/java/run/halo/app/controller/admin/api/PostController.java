@@ -2,7 +2,6 @@ package run.halo.app.controller.admin.api;
 
 import static org.springframework.data.domain.Sort.Direction.DESC;
 
-import cn.hutool.core.util.IdUtil;
 import io.swagger.annotations.ApiOperation;
 import java.io.UnsupportedEncodingException;
 import java.net.URISyntaxException;
@@ -29,7 +28,6 @@ import run.halo.app.model.dto.post.BasePostDetailDTO;
 import run.halo.app.model.dto.post.BasePostMinimalDTO;
 import run.halo.app.model.dto.post.BasePostSimpleDTO;
 import run.halo.app.model.entity.Post;
-import run.halo.app.model.enums.PostPermalinkType;
 import run.halo.app.model.enums.PostStatus;
 import run.halo.app.model.params.PostContentParam;
 import run.halo.app.model.params.PostParam;
@@ -37,6 +35,7 @@ import run.halo.app.model.params.PostQuery;
 import run.halo.app.model.vo.PostDetailVO;
 import run.halo.app.service.OptionService;
 import run.halo.app.service.PostService;
+import run.halo.app.utils.HaloUtils;
 
 /**
  * Post controller.
@@ -103,7 +102,7 @@ public class PostController {
     @GetMapping("{postId:\\d+}")
     @ApiOperation("Gets a post")
     public PostDetailVO getBy(@PathVariable("postId") Integer postId) {
-        Post post = postService.getById(postId);
+        Post post = postService.getWithLatestContentById(postId);
         return postService.convertToDetailVo(post, true);
     }
 
@@ -131,7 +130,7 @@ public class PostController {
         @RequestParam(value = "autoSave", required = false, defaultValue = "false") Boolean autoSave
     ) {
         // Get the post info
-        Post postToUpdate = postService.getById(postId);
+        Post postToUpdate = postService.getWithLatestContentById(postId);
 
         postParam.update(postToUpdate);
         return postService.updateBy(postToUpdate, postParam.getTagIds(), postParam.getCategoryIds(),
@@ -160,10 +159,12 @@ public class PostController {
     public BasePostDetailDTO updateDraftBy(
         @PathVariable("postId") Integer postId,
         @RequestBody PostContentParam contentParam) {
+        Post postToUse = postService.getById(postId);
+        String formattedContent = contentParam.decideContentBy(postToUse.getEditorType());
         // Update draft content
-        Post post = postService.updateDraftContent(contentParam.getContent(), postId);
-
-        return new BasePostDetailDTO().convertFrom(post);
+        Post post = postService.updateDraftContent(formattedContent,
+            contentParam.getOriginalContent(), postId);
+        return postService.convertToDetail(post);
     }
 
     @DeleteMapping("{postId:\\d+}")
@@ -188,7 +189,7 @@ public class PostController {
 
         BasePostMinimalDTO postMinimalDTO = postService.convertToMinimal(post);
 
-        String token = IdUtil.simpleUUID();
+        String token = HaloUtils.simpleUUID();
 
         // cache preview token
         cacheStore.putAny(token, token, 10, TimeUnit.MINUTES);

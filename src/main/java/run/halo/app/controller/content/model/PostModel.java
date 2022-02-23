@@ -3,7 +3,6 @@ package run.halo.app.controller.content.model;
 import static run.halo.app.model.support.HaloConst.POST_PASSWORD_TEMPLATE;
 import static run.halo.app.model.support.HaloConst.SUFFIX_FTL;
 
-import cn.hutool.core.util.StrUtil;
 import java.util.List;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
@@ -17,11 +16,12 @@ import run.halo.app.cache.AbstractStringCacheStore;
 import run.halo.app.exception.ForbiddenException;
 import run.halo.app.exception.NotFoundException;
 import run.halo.app.model.entity.Category;
+import run.halo.app.model.entity.Content;
+import run.halo.app.model.entity.Content.PatchedContent;
 import run.halo.app.model.entity.Post;
 import run.halo.app.model.entity.PostMeta;
 import run.halo.app.model.entity.Tag;
 import run.halo.app.model.enums.EncryptTypeEnum;
-import run.halo.app.model.enums.PostEditorType;
 import run.halo.app.model.enums.PostStatus;
 import run.halo.app.model.vo.ArchiveYearVO;
 import run.halo.app.model.vo.PostListVO;
@@ -34,12 +34,12 @@ import run.halo.app.service.PostService;
 import run.halo.app.service.PostTagService;
 import run.halo.app.service.TagService;
 import run.halo.app.service.ThemeService;
-import run.halo.app.utils.MarkdownUtils;
 
 /**
  * Post Model
  *
  * @author ryanwang
+ * @author guqing
  * @date 2020-01-07
  */
 @Component
@@ -91,7 +91,7 @@ public class PostModel {
         if (PostStatus.RECYCLE.equals(post.getStatus())) {
             // Articles in the recycle bin are not allowed to be accessed.
             throw new NotFoundException("查询不到该文章的信息");
-        } else if (StrUtil.isNotEmpty(token)) {
+        } else if (StringUtils.isNotBlank(token)) {
             // If the token is not empty, it means it is an admin request,
             // then verify the token.
 
@@ -117,12 +117,13 @@ public class PostModel {
             return "common/template/" + POST_PASSWORD_TEMPLATE;
         }
 
-        post = postService.getById(post.getId());
-
-        if (post.getEditorType().equals(PostEditorType.MARKDOWN)) {
-            post.setFormatContent(MarkdownUtils.renderHtml(post.getOriginalContent()));
+        if (StringUtils.isNotBlank(token)) {
+            post = postService.getWithLatestContentById(post.getId());
         } else {
-            post.setFormatContent(post.getOriginalContent());
+            post = postService.getById(post.getId());
+            // Set post content
+            Content postContent = postService.getContentById(post.getId());
+            post.setContent(PatchedContent.of(postContent));
         }
 
         postService.publishVisitEvent(post.getId());
@@ -149,7 +150,7 @@ public class PostModel {
             model.addAttribute("meta_description", post.getMetaDescription());
         } else {
             model.addAttribute("meta_description",
-                postService.generateDescription(post.getFormatContent()));
+                postService.generateDescription(post.getContent().getContent()));
         }
 
         model.addAttribute("is_post", true);

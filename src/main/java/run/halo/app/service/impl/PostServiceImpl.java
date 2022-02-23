@@ -3,9 +3,6 @@ package run.halo.app.service.impl;
 import static org.springframework.data.domain.Sort.Direction.DESC;
 import static run.halo.app.model.support.HaloConst.URL_SEPARATOR;
 
-import cn.hutool.core.collection.CollectionUtil;
-import cn.hutool.core.date.DateUtil;
-import cn.hutool.core.util.StrUtil;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
@@ -42,6 +39,8 @@ import run.halo.app.exception.NotFoundException;
 import run.halo.app.model.dto.post.BasePostMinimalDTO;
 import run.halo.app.model.dto.post.BasePostSimpleDTO;
 import run.halo.app.model.entity.Category;
+import run.halo.app.model.entity.Content;
+import run.halo.app.model.entity.Content.PatchedContent;
 import run.halo.app.model.entity.Post;
 import run.halo.app.model.entity.PostCategory;
 import run.halo.app.model.entity.PostComment;
@@ -64,6 +63,8 @@ import run.halo.app.repository.PostRepository;
 import run.halo.app.repository.base.BasePostRepository;
 import run.halo.app.service.AuthorizationService;
 import run.halo.app.service.CategoryService;
+import run.halo.app.service.ContentPatchLogService;
+import run.halo.app.service.ContentService;
 import run.halo.app.service.OptionService;
 import run.halo.app.service.PostCategoryService;
 import run.halo.app.service.PostCommentService;
@@ -72,6 +73,7 @@ import run.halo.app.service.PostService;
 import run.halo.app.service.PostTagService;
 import run.halo.app.service.TagService;
 import run.halo.app.utils.DateUtils;
+import run.halo.app.utils.HaloUtils;
 import run.halo.app.utils.MarkdownUtils;
 import run.halo.app.utils.ServiceUtils;
 import run.halo.app.utils.SlugUtils;
@@ -99,6 +101,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
     private final PostTagService postTagService;
 
+    private final ContentService postContentService;
+
     private final PostCategoryService postCategoryService;
 
     private final PostCommentService postCommentService;
@@ -111,6 +115,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
     private final AuthorizationService authorizationService;
 
+    private final ContentPatchLogService postContentPatchLogService;
+
     public PostServiceImpl(BasePostRepository<Post> basePostRepository,
         OptionService optionService,
         PostRepository postRepository,
@@ -121,8 +127,10 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         PostCommentService postCommentService,
         ApplicationEventPublisher eventPublisher,
         PostMetaService postMetaService,
-        AuthorizationService authorizationService) {
-        super(basePostRepository, optionService);
+        AuthorizationService authorizationService,
+        ContentService contentService,
+        ContentPatchLogService contentPatchLogService) {
+        super(basePostRepository, optionService, contentService, contentPatchLogService);
         this.postRepository = postRepository;
         this.tagService = tagService;
         this.categoryService = categoryService;
@@ -133,6 +141,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         this.postMetaService = postMetaService;
         this.optionService = optionService;
         this.authorizationService = authorizationService;
+        this.postContentService = contentService;
+        this.postContentPatchLogService = contentPatchLogService;
     }
 
     @Override
@@ -151,7 +161,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
         PostQuery postQuery = new PostQuery();
         postQuery.setKeyword(keyword);
-        postQuery.setStatus(PostStatus.PUBLISHED);
+        postQuery.setStatuses(Set.of(PostStatus.PUBLISHED));
 
         // Build specification and find all
         return postRepository.findAll(buildSpecByQuery(postQuery), pageable);
@@ -270,6 +280,11 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     }
 
     @Override
+    public PatchedContent getLatestContentById(Integer id) {
+        return postContentPatchLogService.getByPostId(id);
+    }
+
+    @Override
     public List<Post> removeByIds(Collection<Integer> ids) {
         if (CollectionUtils.isEmpty(ids)) {
             return Collections.emptyList();
@@ -280,6 +295,17 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     @Override
     public Post getBySlug(String slug) {
         return super.getBySlug(slug);
+    }
+
+    @Override
+    public Post getWithLatestContentById(Integer postId) {
+        Post post = getById(postId);
+        Content postContent = getContentById(postId);
+        // Use the head pointer stored in the post content.
+        PatchedContent patchedContent =
+            postContentPatchLogService.getPatchedContentById(postContent.getHeadPatchLogId());
+        post.setContent(patchedContent);
+        return post;
     }
 
     @Override
@@ -382,9 +408,9 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
             for (String key : frontMatter.keySet()) {
                 elementValue = frontMatter.get(key);
                 for (String ele : elementValue) {
-                    ele = StrUtil.strip(ele, "[", "]");
-                    ele = StrUtil.strip(ele, "\"");
-                    ele = StrUtil.strip(ele, "\'");
+                    ele = HaloUtils.strip(ele, "[", "]");
+                    ele = StringUtils.strip(ele, "\"");
+                    ele = StringUtils.strip(ele, "\'");
                     if ("".equals(ele)) {
                         continue;
                     }
@@ -393,7 +419,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                             post.setTitle(ele);
                             break;
                         case "date":
-                            post.setCreateTime(DateUtil.parse(ele));
+                            post.setCreateTime(DateUtils.parseDate(ele));
                             break;
                         case "permalink":
                             post.setSlug(ele);
@@ -411,13 +437,17 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                             Tag tag;
                             for (String tagName : ele.split(",")) {
                                 tagName = tagName.trim();
-                                tagName = StrUtil.strip(tagName, "\"");
-                                tagName = StrUtil.strip(tagName, "\'");
+                                tagName = StringUtils.strip(tagName, "\"");
+                                tagName = StringUtils.strip(tagName, "\'");
                                 tag = tagService.getByName(tagName);
+                                String slug = SlugUtils.slug(tagName);
+                                if (null == tag) {
+                                    tag = tagService.getBySlug(slug);
+                                }
                                 if (null == tag) {
                                     tag = new Tag();
                                     tag.setName(tagName);
-                                    tag.setSlug(SlugUtils.slug(tagName));
+                                    tag.setSlug(slug);
                                     tag = tagService.create(tag);
                                 }
                                 tagIds.add(tag.getId());
@@ -427,8 +457,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                             Integer lastCategoryId = null;
                             for (String categoryName : ele.split(",")) {
                                 categoryName = categoryName.trim();
-                                categoryName = StrUtil.strip(categoryName, "\"");
-                                categoryName = StrUtil.strip(categoryName, "\'");
+                                categoryName = StringUtils.strip(categoryName, "\"");
+                                categoryName = StringUtils.strip(categoryName, "\'");
                                 Category category = categoryService.getByName(categoryName);
                                 if (null == category) {
                                     category = new Category();
@@ -519,7 +549,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         }
 
         content.append("---\n\n");
-        content.append(post.getOriginalContent());
+        PatchedContent postContent = post.getContent();
+        content.append(postContent.getOriginalContent());
         return content.toString();
     }
 
@@ -571,6 +602,10 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         List<PostComment> postComments = postCommentService.removeByPostId(postId);
         log.debug("Removed post comments: [{}]", postComments);
 
+        // Remove post content
+        Content postContent = postContentService.removeById(postId);
+        log.debug("Removed post content: [{}]", postContent);
+
         Post deletedPost = super.removeById(postId);
 
         // Log it
@@ -610,9 +645,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         return postPage.map(post -> {
             PostListVO postListVO = new PostListVO().convertFrom(post);
 
-            if (StringUtils.isBlank(postListVO.getSummary())) {
-                postListVO.setSummary(generateSummary(post.getFormatContent()));
-            }
+            generateAndSetSummaryIfAbsent(post, postListVO);
 
             Optional.ofNullable(tagListMap.get(post.getId())).orElseGet(LinkedList::new);
 
@@ -641,6 +674,10 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
             postListVO.setCommentCount(commentCountMap.getOrDefault(post.getId(), 0L));
 
             postListVO.setFullPath(buildFullPath(post));
+
+            // Post currently drafting in process
+            Boolean isInProcess = postContentService.draftingInProgress(post.getId());
+            postListVO.setInProgress(isInProcess);
 
             return postListVO;
         });
@@ -674,9 +711,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         return posts.stream().map(post -> {
             PostListVO postListVO = new PostListVO().convertFrom(post);
 
-            if (StringUtils.isBlank(postListVO.getSummary())) {
-                postListVO.setSummary(generateSummary(post.getFormatContent()));
-            }
+            generateAndSetSummaryIfAbsent(post, postListVO);
 
             Optional.ofNullable(tagListMap.get(post.getId())).orElseGet(LinkedList::new);
 
@@ -738,9 +773,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         BasePostSimpleDTO basePostSimpleDTO = new BasePostSimpleDTO().convertFrom(post);
 
         // Set summary
-        if (StringUtils.isBlank(basePostSimpleDTO.getSummary())) {
-            basePostSimpleDTO.setSummary(generateSummary(post.getFormatContent()));
-        }
+        generateAndSetSummaryIfAbsent(post, basePostSimpleDTO);
 
         basePostSimpleDTO.setFullPath(buildFullPath(post));
 
@@ -763,10 +796,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
         // Convert to base detail vo
         PostDetailVO postDetailVO = new PostDetailVO().convertFrom(post);
-
-        if (StringUtils.isBlank(postDetailVO.getSummary())) {
-            postDetailVO.setSummary(generateSummary(post.getFormatContent()));
-        }
+        generateAndSetSummaryIfAbsent(post, postDetailVO);
 
         // Extract ids
         Set<Integer> tagIds = ServiceUtils.fetchProperty(tags, Tag::getId);
@@ -785,9 +815,18 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         postDetailVO.setMetaIds(metaIds);
         postDetailVO.setMetas(postMetaService.convertTo(postMetaList));
 
-        postDetailVO.setCommentCount(postCommentService.countByPostId(post.getId()));
+        postDetailVO.setCommentCount(postCommentService.countByStatusAndPostId(
+            CommentStatus.PUBLISHED, post.getId()));
 
         postDetailVO.setFullPath(buildFullPath(post));
+
+        PatchedContent postContent = post.getContent();
+        postDetailVO.setContent(postContent.getContent());
+        postDetailVO.setOriginalContent(postContent.getOriginalContent());
+
+        // Post currently drafting in process
+        Boolean inProgress = postContentService.draftingInProgress(post.getId());
+        postDetailVO.setInProgress(inProgress);
 
         return postDetailVO;
     }
@@ -805,18 +844,23 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         return (root, query, criteriaBuilder) -> {
             List<Predicate> predicates = new LinkedList<>();
 
-            if (postQuery.getStatus() != null) {
-                predicates.add(criteriaBuilder.equal(root.get("status"), postQuery.getStatus()));
+            Set<PostStatus> statuses = postQuery.getStatuses();
+            if (!CollectionUtils.isEmpty(statuses)) {
+                predicates.add(root.get("status").in(statuses));
             }
 
             if (postQuery.getCategoryId() != null) {
+                List<Integer> categoryIds =
+                    categoryService.listAllByParentId(postQuery.getCategoryId())
+                        .stream()
+                        .map(Category::getId)
+                        .collect(Collectors.toList());
                 Subquery<Post> postSubquery = query.subquery(Post.class);
                 Root<PostCategory> postCategoryRoot = postSubquery.from(PostCategory.class);
                 postSubquery.select(postCategoryRoot.get("postId"));
                 postSubquery.where(
                     criteriaBuilder.equal(root.get("id"), postCategoryRoot.get("postId")),
-                    criteriaBuilder
-                        .equal(postCategoryRoot.get("categoryId"), postQuery.getCategoryId()));
+                    postCategoryRoot.get("categoryId").in(categoryIds));
                 predicates.add(criteriaBuilder.exists(postSubquery));
             }
 
@@ -843,7 +887,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
         // Create or update post
         Boolean needEncrypt = Optional.ofNullable(categoryIds)
-            .filter(CollectionUtil::isNotEmpty)
+            .filter(HaloUtils::isNotEmpty)
             .map(categoryIdSet -> {
                 for (Integer categoryId : categoryIdSet) {
                     if (categoryService.categoryHasEncrypt(categoryId)) {
@@ -893,6 +937,10 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
         // Remove authorization every time an post is created or updated.
         authorizationService.deletePostAuthorization(post.getId());
 
+        // get draft content by head patch log id
+        Content postContent = postContentService.getById(post.getId());
+        post.setContent(
+            postContentPatchLogService.getPatchedContentById(postContent.getHeadPatchLogId()));
         // Convert to post detail vo
         return convertTo(post, tags, categories, postMetaList);
     }
@@ -933,9 +981,8 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
     @Override
     public List<PostMarkdownVO> listPostMarkdowns() {
         List<Post> allPostList = listAll();
-        List<PostMarkdownVO> result = new ArrayList(allPostList.size());
-        for (int i = 0; i < allPostList.size(); i++) {
-            Post post = allPostList.get(i);
+        List<PostMarkdownVO> result = new ArrayList<>(allPostList.size());
+        for (Post post : allPostList) {
             result.add(convertToPostMarkdownVo(post));
         }
         return result;
@@ -978,11 +1025,12 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                 tagContent.append(" | ").append(tagName);
             }
         }
-        frontMatter.append("tags: ").append(tagContent.toString()).append("\n");
+        frontMatter.append("tags: ").append(tagContent).append("\n");
 
         frontMatter.append("---\n");
         postMarkdownVO.setFrontMatter(frontMatter.toString());
-        postMarkdownVO.setOriginalContent(post.getOriginalContent());
+        PatchedContent postContent = post.getContent();
+        postMarkdownVO.setOriginalContent(postContent.getOriginalContent());
         postMarkdownVO.setTitle(post.getTitle());
         postMarkdownVO.setSlug(post.getSlug());
         return postMarkdownVO;
@@ -996,11 +1044,11 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
 
         String archivesPrefix = optionService.getArchivesPrefix();
 
-        int month = DateUtil.month(post.getCreateTime()) + 1;
+        int month = DateUtils.month(post.getCreateTime()) + 1;
 
         String monthString = month < 10 ? "0" + month : String.valueOf(month);
 
-        int day = DateUtil.dayOfMonth(post.getCreateTime());
+        int day = DateUtils.dayOfMonth(post.getCreateTime());
 
         String dayString = day < 10 ? "0" + day : String.valueOf(day);
 
@@ -1021,14 +1069,14 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
             fullPath.append("?p=")
                 .append(post.getId());
         } else if (permalinkType.equals(PostPermalinkType.DATE)) {
-            fullPath.append(DateUtil.year(post.getCreateTime()))
+            fullPath.append(DateUtils.year(post.getCreateTime()))
                 .append(URL_SEPARATOR)
                 .append(monthString)
                 .append(URL_SEPARATOR)
                 .append(post.getSlug())
                 .append(pathSuffix);
         } else if (permalinkType.equals(PostPermalinkType.DAY)) {
-            fullPath.append(DateUtil.year(post.getCreateTime()))
+            fullPath.append(DateUtils.year(post.getCreateTime()))
                 .append(URL_SEPARATOR)
                 .append(monthString)
                 .append(URL_SEPARATOR)
@@ -1037,7 +1085,7 @@ public class PostServiceImpl extends BasePostServiceImpl<Post> implements PostSe
                 .append(post.getSlug())
                 .append(pathSuffix);
         } else if (permalinkType.equals(PostPermalinkType.YEAR)) {
-            fullPath.append(DateUtil.year(post.getCreateTime()))
+            fullPath.append(DateUtils.year(post.getCreateTime()))
                 .append(URL_SEPARATOR)
                 .append(post.getSlug())
                 .append(pathSuffix);
